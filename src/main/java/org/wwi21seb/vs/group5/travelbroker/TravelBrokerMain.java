@@ -2,19 +2,28 @@ package org.wwi21seb.vs.group5.travelbroker;
 
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.fxml.FXMLLoader;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.input.MouseEvent;
+import javafx.scene.control.cell.PropertyValueFactory;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import org.wwi21seb.vs.group5.Model.Booking;
+import org.wwi21seb.vs.group5.Model.Car;
+import org.wwi21seb.vs.group5.Model.Room;
 import org.wwi21seb.vs.group5.Request.AvailabilityRequest;
+import org.wwi21seb.vs.group5.Request.CarReservationRequest;
+import org.wwi21seb.vs.group5.Request.HotelReservationRequest;
 import org.wwi21seb.vs.group5.travelbroker.Client.TravelBrokerClient;
 
-import java.io.IOException;
 import java.net.SocketException;
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 public class TravelBrokerMain extends Application {
 
@@ -24,6 +33,12 @@ public class TravelBrokerMain extends Application {
     private Scene travelBrokerScene;
     private Scene hotelProviderScene;
     private Scene carProviderScene;
+    private ObservableList<Car> cars = FXCollections.observableArrayList();
+    private ObservableList<Room> rooms = FXCollections.observableArrayList();
+
+    public static void main(String[] args) {
+        launch();
+    }
 
     private MenuBar createMenuBar(Stage primaryStage) {
         // Setup menu
@@ -149,7 +164,7 @@ public class TravelBrokerMain extends Application {
         getBookingsPane.setTop(createMenuBar(primaryStage));
 
         VBox getBookingsBox = new VBox();
-        ListView<String> bookingsListView = new ListView<>();
+        ListView<Booking> bookingsListView = new ListView<>();
         getBookingsBox.getChildren().addAll(new Label("Your Bookings:"), bookingsListView);
 
         getBookingsPane.setCenter(getBookingsBox);
@@ -163,63 +178,181 @@ public class TravelBrokerMain extends Application {
         BorderPane bookingPane = new BorderPane();
         bookingPane.setTop(createMenuBar(primaryStage));
 
-        VBox bookingBox = new VBox();
+        Label selectedRoomLabel = new Label("None");
+        Label selectedCarLabel = new Label("None");
+
+        VBox wrapperBox = new VBox(15);
+
+        HBox formBox = new HBox(15);
         Label bookingLabel = new Label("Select Date Range:");
-        DatePicker startDatePicker = createDatePicker();
-        DatePicker endDatePicker = createDatePicker();
-        Button searchButton = new Button("Search Availability");
 
-        ListView<Object> hotelListView = new ListView<>();
-        ListView<Object> carListView = new ListView<>();
-        Button bookButton = new Button("Book");
+        DatePicker startDatePicker = new DatePicker(LocalDate.now());
+        DatePicker endDatePicker = new DatePicker(LocalDate.now().plus(1, ChronoUnit.DAYS));
 
-        searchButton.setOnMouseClicked((e -> {
-            String startDate = startDatePicker.getValue().toString();
-            String endDate = endDatePicker.getValue().toString();
-            int capacity = 1;
-
-            AvailabilityRequest availabilityRequest = new AvailabilityRequest(startDate, endDate, capacity);
-
-            client.getHotelAvailability(availabilityRequest).thenAccept(hotels -> {
-                Platform.runLater(() -> {
-                    hotelListView.getItems().clear();
-                    hotelListView.getItems().addAll(hotels);
-                });
-            });
-
-            client.getCarAvailability(availabilityRequest).thenAccept(carList -> {
-                // This runs when the car list is available
-                carListView.getItems().clear();
-                carListView.getItems().addAll(carList);
-            });
-        }));
-
-        bookingBox.getChildren().addAll(
-                bookingLabel, startDatePicker, endDatePicker,
-                searchButton, hotelListView, carListView, bookButton
-        );
-        bookingPane.setCenter(bookingBox);
-
-        int width = (int) Screen.getPrimary().getBounds().getWidth();
-        int height = (int) Screen.getPrimary().getBounds().getHeight();
-        bookingScene = new Scene(bookingPane, width, height);
-    }
-
-    private DatePicker createDatePicker() {
-        DatePicker datePicker = new DatePicker();
-
-        datePicker.setDayCellFactory(picker -> new DateCell() {
+        startDatePicker.setDayCellFactory(picker -> new DateCell() {
             @Override
             public void updateItem(java.time.LocalDate date, boolean empty) {
                 super.updateItem(date, empty);
                 setDisable(empty || date.isBefore(java.time.LocalDate.now()));
             }
         });
+        startDatePicker.valueProperty().addListener((observable, oldValue, newValue) -> {
+            if (endDatePicker.valueProperty().get().isBefore(newValue.plus(1, ChronoUnit.DAYS))) {
+                endDatePicker.setValue(newValue.plus(1, ChronoUnit.DAYS));
+            }
+        });
+        endDatePicker.setDayCellFactory(picker -> new DateCell() {
+            @Override
+            public void updateItem(java.time.LocalDate date, boolean empty) {
+                super.updateItem(date, empty);
+                // Disable all dates before start date and start date itself
+                setDisable(empty || date.isBefore(startDatePicker.getValue())
+                        || date.isEqual(startDatePicker.getValue()));
+            }
+        });
 
-        return datePicker;
-    }
+        Label capacityLabel = new Label("Capacity:");
+        Spinner<Integer> capacitySpinner = new Spinner<>(1, 10, 1);
+        Button searchButton = new Button("Search Availability");
 
-    public static void main(String[] args) {
-        launch();
+        HBox bookingBox = new HBox(15);
+        TableView<Room> hotelTableView = new TableView<>();
+
+        TableColumn<Room, String> roomIdColumn = new TableColumn<>("Room ID");
+        roomIdColumn.setCellValueFactory(new PropertyValueFactory<>("id"));
+
+        TableColumn<Room, String> roomTypeColumn = new TableColumn<>("Room Type");
+        roomTypeColumn.setCellValueFactory(new PropertyValueFactory<>("type"));
+
+        TableColumn<Room, String> roomCapacityColumn = new TableColumn<>("Capacity");
+        roomCapacityColumn.setCellValueFactory(new PropertyValueFactory<>("capacity"));
+
+        TableColumn<Room, String> roomPriceColumn = new TableColumn<>("Price per night");
+        roomPriceColumn.setCellValueFactory(new PropertyValueFactory<>("pricePerNight"));
+
+        hotelTableView.getColumns().add(roomIdColumn);
+        hotelTableView.getColumns().add(roomTypeColumn);
+        hotelTableView.getColumns().add(roomCapacityColumn);
+        hotelTableView.getColumns().add(roomPriceColumn);
+        hotelTableView.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
+        hotelTableView.setItems(rooms);
+        hotelTableView.getSelectionModel().selectedItemProperty().addListener((obs, oldSelection, newSelection) -> {
+            if (newSelection != null) {
+                selectedRoomLabel.setText(newSelection.getId().toString());
+            }
+        });
+
+        TableView<Car> carTableView = new TableView<>();
+
+        TableColumn<Car, String> carIdColumn = new TableColumn<>("Car ID");
+        carIdColumn.setCellValueFactory(new PropertyValueFactory<>("id"));
+
+        TableColumn<Car, String> carModelColumn = new TableColumn<>("Model");
+        carModelColumn.setCellValueFactory(new PropertyValueFactory<>("model"));
+
+        TableColumn<Car, String> carManufacturerColumn = new TableColumn<>("Manufacturer");
+        carManufacturerColumn.setCellValueFactory(new PropertyValueFactory<>("manufacturer"));
+
+        TableColumn<Car, String> carCapacityColumn = new TableColumn<>("Capacity");
+        carCapacityColumn.setCellValueFactory(new PropertyValueFactory<>("capacity"));
+
+        TableColumn<Car, String> carPriceColumn = new TableColumn<>("Price per day");
+        carPriceColumn.setCellValueFactory(new PropertyValueFactory<>("pricePerDay"));
+
+        carTableView.getColumns().add(carIdColumn);
+        carTableView.getColumns().add(carModelColumn);
+        carTableView.getColumns().add(carManufacturerColumn);
+        carTableView.getColumns().add(carCapacityColumn);
+        carTableView.getColumns().add(carPriceColumn);
+        carTableView.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
+        carTableView.setItems(cars);
+        carTableView.getSelectionModel().selectedItemProperty().addListener((obs, oldSelection, newSelection) -> {
+            if (newSelection != null) {
+                selectedCarLabel.setText(newSelection.getId().toString());
+            }
+        });
+
+        Button bookButton = new Button("Book");
+
+        searchButton.setOnMouseClicked((e -> {
+            String startDate = startDatePicker.getValue().toString();
+            String endDate = endDatePicker.getValue().toString();
+            int capacity = capacitySpinner.getValue();
+
+            AvailabilityRequest availabilityRequest = new AvailabilityRequest(startDate, endDate, capacity);
+
+            client.getHotelAvailability(availabilityRequest).thenAccept(roomList -> {
+                Platform.runLater(() -> {
+                    // This runs when the room list is available
+                    rooms.clear();
+                    rooms.addAll(roomList);
+                });
+            });
+
+            client.getCarAvailability(availabilityRequest).thenAccept(carList -> {
+                Platform.runLater(() -> {
+                    // This runs when the car list is available
+                    cars.clear();
+                    cars.addAll(carList);
+                });
+            });
+        }));
+
+        bookButton.setOnMouseClicked((e -> {
+            if (selectedRoomLabel.getText().equals("None") || selectedCarLabel.getText().equals("None")) {
+                Alert alert = new Alert(Alert.AlertType.ERROR);
+                alert.setTitle("Error");
+                alert.setHeaderText("No room or car selected");
+                alert.setContentText("Please select a room and a car before booking");
+                alert.showAndWait();
+            } else {
+                String startDate = startDatePicker.getValue().toString();
+                String endDate = endDatePicker.getValue().toString();
+                int capacity = capacitySpinner.getValue();
+                UUID roomId = UUID.fromString(selectedRoomLabel.getText());
+                UUID carId = UUID.fromString(selectedCarLabel.getText());
+
+                HotelReservationRequest hotelReservationRequest = new HotelReservationRequest(roomId, startDate, endDate, capacity);
+                CarReservationRequest carReservationRequest = new CarReservationRequest(carId, startDate, endDate);
+
+                client.book(hotelReservationRequest, carReservationRequest).thenAccept(bookingResponse -> {
+                    Platform.runLater(() -> {
+                        // This runs when the booking response is available
+                        Alert alert;
+
+                        if (bookingResponse) {
+                            alert = new Alert(Alert.AlertType.INFORMATION);
+                            alert.setTitle("Success");
+                            alert.setHeaderText("Booking successful");
+                            // alert.setContentText("Your booking ID is " + bookingResponse.getBookingId());
+                        } else {
+                            alert = new Alert(Alert.AlertType.ERROR);
+                            alert.setTitle("Error");
+                            alert.setHeaderText("Booking failed");
+                            alert.setContentText("Your booking could not be made");
+                        }
+                        alert.showAndWait();
+                    });
+                });
+            }
+        }));
+
+        formBox.getChildren().addAll(bookingLabel, startDatePicker, endDatePicker, capacityLabel, capacitySpinner, searchButton);
+        bookingBox.getChildren().addAll(
+                hotelTableView, carTableView
+        );
+        HBox footerBox = new HBox(15);
+        footerBox.getChildren().addAll(
+                new Label("Selected Room: "), selectedRoomLabel,
+                new Label("Selected Car: "), selectedCarLabel,
+                bookButton
+        );
+        wrapperBox.getChildren().addAll(formBox, bookingBox, footerBox);
+
+        bookingPane.setCenter(wrapperBox);
+
+        int width = (int) Screen.getPrimary().getBounds().getWidth();
+        int height = (int) Screen.getPrimary().getBounds().getHeight();
+        bookingScene = new Scene(bookingPane, width, height);
     }
 }
