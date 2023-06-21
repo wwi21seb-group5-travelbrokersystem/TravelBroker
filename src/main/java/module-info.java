@@ -10,7 +10,9 @@ module org.wwi21seb.vs.group5.travelbroker {
             requires org.kordamp.bootstrapfx.core;
             // requires eu.hansolo.tilesfx; This somehow breaks the build
             requires com.almasb.fxgl.all;
-    
+            requires com.fasterxml.jackson.databind;
+    requires SharedUtilities;
+
     opens org.wwi21seb.vs.group5.travelbroker to javafx.fxml;
     exports org.wwi21seb.vs.group5.travelbroker;
 }

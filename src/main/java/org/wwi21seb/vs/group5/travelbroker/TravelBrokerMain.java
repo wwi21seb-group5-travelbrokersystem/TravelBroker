@@ -1,18 +1,24 @@
 package org.wwi21seb.vs.group5.travelbroker;
 
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import org.wwi21seb.vs.group5.Request.AvailabilityRequest;
+import org.wwi21seb.vs.group5.travelbroker.Client.TravelBrokerClient;
 
 import java.io.IOException;
+import java.net.SocketException;
 
 public class TravelBrokerMain extends Application {
 
+    private TravelBrokerClient client;
     private Scene bookingScene;
     private Scene getBookingsScene;
     private Scene travelBrokerScene;
@@ -83,6 +89,14 @@ public class TravelBrokerMain extends Application {
         primaryStage.setScene(initialScene);
         primaryStage.setMaximized(true);
         primaryStage.show();
+
+        // Setup UDP client
+        try {
+            client = new TravelBrokerClient(5010);
+            client.startReceiving();
+        } catch (SocketException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private void setupCarProviderScene(Stage primaryStage) {
@@ -151,13 +165,34 @@ public class TravelBrokerMain extends Application {
 
         VBox bookingBox = new VBox();
         Label bookingLabel = new Label("Select Date Range:");
-        DatePicker startDatePicker = new DatePicker();
-        DatePicker endDatePicker = new DatePicker();
+        DatePicker startDatePicker = createDatePicker();
+        DatePicker endDatePicker = createDatePicker();
         Button searchButton = new Button("Search Availability");
 
-        ListView<String> hotelListView = new ListView<>();
-        ListView<String> carListView = new ListView<>();
+        ListView<Object> hotelListView = new ListView<>();
+        ListView<Object> carListView = new ListView<>();
         Button bookButton = new Button("Book");
+
+        searchButton.setOnMouseClicked((e -> {
+            String startDate = startDatePicker.getValue().toString();
+            String endDate = endDatePicker.getValue().toString();
+            int capacity = 1;
+
+            AvailabilityRequest availabilityRequest = new AvailabilityRequest(startDate, endDate, capacity);
+
+            client.getHotelAvailability(availabilityRequest).thenAccept(hotels -> {
+                Platform.runLater(() -> {
+                    hotelListView.getItems().clear();
+                    hotelListView.getItems().addAll(hotels);
+                });
+            });
+
+            client.getCarAvailability(availabilityRequest).thenAccept(carList -> {
+                // This runs when the car list is available
+                carListView.getItems().clear();
+                carListView.getItems().addAll(carList);
+            });
+        }));
 
         bookingBox.getChildren().addAll(
                 bookingLabel, startDatePicker, endDatePicker,
@@ -168,6 +203,20 @@ public class TravelBrokerMain extends Application {
         int width = (int) Screen.getPrimary().getBounds().getWidth();
         int height = (int) Screen.getPrimary().getBounds().getHeight();
         bookingScene = new Scene(bookingPane, width, height);
+    }
+
+    private DatePicker createDatePicker() {
+        DatePicker datePicker = new DatePicker();
+
+        datePicker.setDayCellFactory(picker -> new DateCell() {
+            @Override
+            public void updateItem(java.time.LocalDate date, boolean empty) {
+                super.updateItem(date, empty);
+                setDisable(empty || date.isBefore(java.time.LocalDate.now()));
+            }
+        });
+
+        return datePicker;
     }
 
     public static void main(String[] args) {
