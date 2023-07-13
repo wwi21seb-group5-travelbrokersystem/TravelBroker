@@ -12,6 +12,7 @@ module org.wwi21seb.vs.group5.travelbroker {
             requires com.almasb.fxgl.all;
             requires com.fasterxml.jackson.databind;
     requires SharedUtilities;
+    requires java.logging;
 
     opens org.wwi21seb.vs.group5.travelbroker to javafx.fxml;
     exports org.wwi21seb.vs.group5.travelbroker;

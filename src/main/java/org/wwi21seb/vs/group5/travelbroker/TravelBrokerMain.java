@@ -1,5 +1,6 @@
 package org.wwi21seb.vs.group5.travelbroker;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
@@ -14,27 +15,41 @@ import javafx.stage.Screen;
 import javafx.stage.Stage;
 import org.wwi21seb.vs.group5.Model.Booking;
 import org.wwi21seb.vs.group5.Model.Car;
+import org.wwi21seb.vs.group5.Model.Rental;
 import org.wwi21seb.vs.group5.Model.Room;
 import org.wwi21seb.vs.group5.Request.AvailabilityRequest;
-import org.wwi21seb.vs.group5.Request.CarReservationRequest;
-import org.wwi21seb.vs.group5.Request.HotelReservationRequest;
-import org.wwi21seb.vs.group5.travelbroker.Client.TravelBrokerClient;
+import org.wwi21seb.vs.group5.Request.ReservationRequest;
+import org.wwi21seb.vs.group5.travelbroker.Server.TravelBrokerServer;
 
 import java.net.SocketException;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+import java.util.Date;
+import java.util.List;
 import java.util.UUID;
 
+/**
+ * The TravelBrokerMain class contains our UI and is the entry point of the
+ * application. In the context of our Two-Phase-Commit protocol, this class
+ * is the client.
+ */
 public class TravelBrokerMain extends Application {
 
-    private TravelBrokerClient client;
+    private TravelBrokerServer server;
     private Scene bookingScene;
     private Scene getBookingsScene;
     private Scene travelBrokerScene;
     private Scene hotelProviderScene;
     private Scene carProviderScene;
+
     private ObservableList<Car> cars = FXCollections.observableArrayList();
     private ObservableList<Room> rooms = FXCollections.observableArrayList();
+    private ObservableList<Booking> bookings = FXCollections.observableArrayList();
+    private ObservableList<Rental> rentals = FXCollections.observableArrayList();
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final String travelBrokerName = "TravelBroker";
+    private final String hotelProviderName = "HotelProvider";
+    private final String carProviderName = "CarProvider";
 
     public static void main(String[] args) {
         launch();
@@ -62,6 +77,22 @@ public class TravelBrokerMain extends Application {
             primaryStage.setScene(bookingScene);
         });
         getBookings.setOnAction(e -> {
+            server.getBookings().thenAccept(resultMap -> {
+                Platform.runLater(() -> {
+                    // This runs when the room list is available
+                    bookings.clear();
+                    rentals.clear();
+
+                    resultMap.forEach((key, value) -> {
+                        if (key.equals("HotelProvider")) {
+                            bookings.addAll(value.stream().map(booking -> (Booking) booking).toList());
+                        } else if (key.equals("CarProvider")) {
+                            rentals.addAll(value.stream().map(rental -> (Rental) rental).toList());
+                        }
+                    });
+                });
+            });
+
             primaryStage.setScene(getBookingsScene);
         });
         travelBroker.setOnAction(e -> {
@@ -80,6 +111,14 @@ public class TravelBrokerMain extends Application {
     @Override
     public void start(Stage primaryStage) {
         primaryStage.setTitle("Travel Booking System");
+
+        // Setup UDP client
+        try {
+            server = new TravelBrokerServer(5010);
+            server.startReceiving();
+        } catch (SocketException e) {
+            throw new RuntimeException(e);
+        }
 
         // Setup booking scene
         setupBookingScene(primaryStage);
@@ -104,14 +143,6 @@ public class TravelBrokerMain extends Application {
         primaryStage.setScene(initialScene);
         primaryStage.setMaximized(true);
         primaryStage.show();
-
-        // Setup UDP client
-        try {
-            client = new TravelBrokerClient(5010);
-            client.startReceiving();
-        } catch (SocketException e) {
-            throw new RuntimeException(e);
-        }
     }
 
     private void setupCarProviderScene(Stage primaryStage) {
@@ -163,11 +194,59 @@ public class TravelBrokerMain extends Application {
         BorderPane getBookingsPane = new BorderPane();
         getBookingsPane.setTop(createMenuBar(primaryStage));
 
-        VBox getBookingsBox = new VBox();
-        ListView<Booking> bookingsListView = new ListView<>();
-        getBookingsBox.getChildren().addAll(new Label("Your Bookings:"), bookingsListView);
+        HBox bookingBox = new HBox(15);
+        TableView<Booking> bookingTableView = new TableView<>();
 
-        getBookingsPane.setCenter(getBookingsBox);
+        TableColumn<Booking, String> bookingIdIdcolumn = new TableColumn<>("Booking ID");
+        bookingIdIdcolumn.setCellValueFactory(new PropertyValueFactory<>("id"));
+
+        TableColumn<Booking, String> roomIdColumn = new TableColumn<>("Room ID");
+        roomIdColumn.setCellValueFactory(new PropertyValueFactory<>("roomId"));
+
+        TableColumn<Booking, Date> startDateColumn = new TableColumn<>("Start Date");
+        startDateColumn.setCellValueFactory(new PropertyValueFactory<>("startDate"));
+
+        TableColumn<Booking, Date> endDateColumn = new TableColumn<>("End Date");
+        endDateColumn.setCellValueFactory(new PropertyValueFactory<>("endDate"));
+
+        TableColumn<Booking, String> totalPriceColumn = new TableColumn<>("Total price");
+        totalPriceColumn.setCellValueFactory(new PropertyValueFactory<>("totalPrice"));
+
+        bookingTableView.getColumns().add(bookingIdIdcolumn);
+        bookingTableView.getColumns().add(roomIdColumn);
+        bookingTableView.getColumns().add(startDateColumn);
+        bookingTableView.getColumns().add(endDateColumn);
+        bookingTableView.getColumns().add(totalPriceColumn);
+        bookingTableView.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
+        bookingTableView.setItems(bookings);
+
+        TableView<Rental> carTableView = new TableView<>();
+
+        TableColumn<Rental, String> rentalIdColumn = new TableColumn<>("Rental ID");
+        rentalIdColumn.setCellValueFactory(new PropertyValueFactory<>("id"));
+
+        TableColumn<Rental, String> carIdColumn = new TableColumn<>("Car ID");
+        carIdColumn.setCellValueFactory(new PropertyValueFactory<>("car_id"));
+
+        TableColumn<Rental, String> carStartDateColumn = new TableColumn<>("Start date");
+        carStartDateColumn.setCellValueFactory(new PropertyValueFactory<>("start_date"));
+
+        TableColumn<Rental, String> carEndDateColumn = new TableColumn<>("End date");
+        carEndDateColumn.setCellValueFactory(new PropertyValueFactory<>("end_date"));
+
+        TableColumn<Rental, String> carPriceColumn = new TableColumn<>("Total price");
+        carPriceColumn.setCellValueFactory(new PropertyValueFactory<>("total_price"));
+
+        carTableView.getColumns().add(rentalIdColumn);
+        carTableView.getColumns().add(carIdColumn);
+        carTableView.getColumns().add(carStartDateColumn);
+        carTableView.getColumns().add(carEndDateColumn);
+        carTableView.getColumns().add(carPriceColumn);
+        carTableView.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
+        carTableView.setItems(rentals);
+
+        bookingBox.getChildren().addAll(bookingTableView, carTableView);
+        getBookingsPane.setCenter(bookingBox);
 
         int width = (int) Screen.getPrimary().getBounds().getWidth();
         int height = (int) Screen.getPrimary().getBounds().getHeight();
@@ -280,19 +359,22 @@ public class TravelBrokerMain extends Application {
             int capacity = capacitySpinner.getValue();
 
             AvailabilityRequest availabilityRequest = new AvailabilityRequest(startDate, endDate, capacity);
-
-            client.getHotelAvailability(availabilityRequest).thenAccept(roomList -> {
+            server.getAvailability(availabilityRequest).thenAccept(resultMap -> {
                 Platform.runLater(() -> {
                     // This runs when the room list is available
+                    // First clear the existing values of the lists
                     rooms.clear();
-                    rooms.addAll(roomList);
-                });
-            });
-
-            client.getCarAvailability(availabilityRequest).thenAccept(carList -> {
-                Platform.runLater(() -> {
-                    // This runs when the car list is available
                     cars.clear();
+
+                    // Get the result lists
+                    List<Room> roomList = resultMap.get(hotelProviderName).stream().map(room -> (Room) room).toList();
+                    List<Car> carList = resultMap.get(carProviderName).stream().map(car -> (Car) car).toList();
+
+                    System.out.println(roomList);
+                    System.out.println(carList);
+
+                    // Add the new result lists
+                    rooms.addAll(roomList);
                     cars.addAll(carList);
                 });
             });
@@ -312,10 +394,9 @@ public class TravelBrokerMain extends Application {
                 UUID roomId = UUID.fromString(selectedRoomLabel.getText());
                 UUID carId = UUID.fromString(selectedCarLabel.getText());
 
-                HotelReservationRequest hotelReservationRequest = new HotelReservationRequest(roomId, startDate, endDate, capacity);
-                CarReservationRequest carReservationRequest = new CarReservationRequest(carId, startDate, endDate);
+                ReservationRequest reservationRequest = new ReservationRequest(null, startDate, endDate, capacity);
 
-                client.book(hotelReservationRequest, carReservationRequest).thenAccept(bookingResponse -> {
+                server.book(reservationRequest, roomId, carId).thenAccept(bookingResponse -> {
                     Platform.runLater(() -> {
                         // This runs when the booking response is available
                         Alert alert;
