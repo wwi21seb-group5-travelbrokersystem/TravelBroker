@@ -3,6 +3,7 @@ package org.wwi21seb.vs.group5.travelbroker.Server;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.wwi21seb.vs.group5.Logger.LoggerFactory;
 import org.wwi21seb.vs.group5.Model.Booking;
 import org.wwi21seb.vs.group5.Model.Car;
 import org.wwi21seb.vs.group5.Model.Rental;
@@ -24,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * The TravelBrokerServer represents the server in our Travel Broker and
@@ -32,7 +34,7 @@ import java.util.*;
  */
 public class TravelBrokerServer {
     // The logger is used to log messages to the console.
-    private static final Logger LOGGER = Logger.getLogger(TravelBrokerServer.class.getName());
+    private static final Logger LOGGER = LoggerFactory.setupLogger(TravelBrokerServer.class.getName());
 
     // The logWriter is used to write our Contexts to a file. This is used to
     // recover from a crash.
@@ -169,12 +171,13 @@ public class TravelBrokerServer {
                 // Add future to list
                 futures.add(sendPacket(participant.getUrl(), participant.getPort(), message));
             } catch (IOException e) {
+                LOGGER.log(Level.WARNING, "Error sending UDP packet: {0}", e.getMessage());
                 throw new RuntimeException(e);
             }
         });
 
         // Wait for all futures to complete and return resulting future
-        System.out.println("Waiting for all futures to complete");
+        LOGGER.log(Level.INFO, "Waiting for all GET_AVAILABILITY requests to complete...");
         return getMapCompletableFuture(futures, true);
     }
 
@@ -189,6 +192,7 @@ public class TravelBrokerServer {
                 // Add future to list
                 futures.add(sendPacket(participant.getUrl(), participant.getPort(), message));
             } catch (IOException e) {
+                LOGGER.log(Level.WARNING, "Error sending UDP packet: {0}", e.getMessage());
                 throw new RuntimeException(e);
             }
         });
@@ -229,6 +233,7 @@ public class TravelBrokerServer {
         context.setSuccess(future);
         context.setParticipants(newParticipants);
         logWriter.writeLog(transactionId, context);
+        contexts.put(transactionId, context);
 
         participants.forEach(participant -> {
             // Send a PREPARE request to each participant
@@ -324,15 +329,76 @@ public class TravelBrokerServer {
         });
     }
 
-    private void receivePrepare(Object message) {
+    private void receivePrepare(UDPMessage message) {
+        // Deserialize data to TransactionResult
+        TransactionResult result;
+        try {
+            result = mapper.readValue(message.getData(), TransactionResult.class);
+        } catch (JsonProcessingException e) {
+            LOGGER.log(Level.WARNING, "Error parsing JSON: {0}", e.getMessage());
+            throw new RuntimeException(e);
+        }
 
+        // Find the context for this transaction
+        CoordinatorContext context = contexts.get(message.getTransactionId());
+
+        // Find the participant within the context
+        Participant participant = context.getParticipants()
+                .stream()
+                .filter(p -> p.getName().equals(message.getSender()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Unknown participant: " + message.getSender()));
+
+        // Update the vote
+        participant.setVote(result.isSuccess() ? Vote.YES : Vote.NO);
+        // Mark the participant as having voted and cancel the timeout for this participant
+        participant.getPrepareFuture().cancel(false);
+
+        // If all participants have responded, evaluate the votes
+        if (context.getParticipants().stream().noneMatch((p) -> p.getVote().equals(Vote.PENDING))) {
+            if (context.getParticipants().stream().allMatch((p) -> p.getVote().equals(Vote.YES))) {
+                // All participants have voted YES, so we can commit
+                sendCommit(message.getTransactionId());
+            } else {
+                // At least one participant has voted NO, so we have to abort
+                sendAbort(message.getTransactionId());
+            }
+
+            // Cancel the timeout
+            participant.getPrepareFuture().cancel(false);
+        }
     }
 
-    private void receiveCommit(Object message) {
+    private void receiveCommit(UDPMessage message) {
+        // Find the context for this transaction
+        CoordinatorContext context = contexts.get(message.getTransactionId());
 
+        // Find the participant within the context
+        Participant participant = context.getParticipants()
+                .stream()
+                .filter(p -> p.getName().equals(message.getSender()))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Unknown participant: " + message.getSender()));
+
+        // If all participants have responded, we can remove the context
+        if (context.getParticipants().stream().allMatch(Participant::isDone)) {
+            contexts.remove(message.getTransactionId());
+        } else {
+            // Otherwise we update the transaction context for the participant
+            context.setParticipants(context.getParticipants()
+                    .stream()
+                    .peek(p -> {
+                        if (p.getName().equals(message.getSender())) {
+                            p.setDone();
+                        }
+                    })
+                    .toList());
+            contexts.put(message.getTransactionId(), context);
+            logWriter.writeLog(message.getTransactionId(), context);
+        }
     }
 
-    private void receiveAbort(Object message) {
+    private void receiveAbort(UDPMessage message) {
 
     }
 
@@ -340,7 +406,7 @@ public class TravelBrokerServer {
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                 .thenApply(response -> {
                     Map<String, List<Object>> result = new HashMap<>();
-                    System.out.println("All futures completed");
+                    LOGGER.log(Level.INFO, "All responses received");
 
                     futures.forEach(msg -> {
                         try {
@@ -348,7 +414,7 @@ public class TravelBrokerServer {
                             UDPMessage message = msg.get();
                             switch (message.getSender()) {
                                 case "HotelProvider" -> {
-                                    System.out.println("Parsing HotelProvider response");
+                                    LOGGER.log(Level.INFO, "Parsing HotelProvider response");
 
                                     if (isAvailability) {
                                         List<Room> rooms = mapper.readValue(message.getData(), new TypeReference<>() {
@@ -361,7 +427,7 @@ public class TravelBrokerServer {
                                     }
                                 }
                                 case "CarProvider" -> {
-                                    System.out.println("Parsing CarProvider response");
+                                    LOGGER.log(Level.INFO, "Parsing CarProvider response");
 
                                     if (isAvailability) {
                                         List<Car> cars = mapper.readValue(message.getData(), new TypeReference<>() {
@@ -387,7 +453,7 @@ public class TravelBrokerServer {
                         }
                     });
 
-                    System.out.println("Returning result");
+                    LOGGER.log(Level.INFO, "Returning result {0}", result);
                     return result;
                 });
     }
