@@ -77,14 +77,7 @@ public class TravelBrokerServer {
         }
 
         coordinator = new Coordinator("TravelBroker", InetAddress.getLoopbackAddress(), 5000);
-        participants = List.of(
-                new Participant(
-                        "CarProvider", InetAddress.getLoopbackAddress(), 5001
-                ),
-                new Participant(
-                        "HotelProvider", InetAddress.getLoopbackAddress(), 5002
-                )
-        );
+        participants = List.of(new Participant("CarProvider", InetAddress.getLoopbackAddress(), 5001), new Participant("HotelProvider", InetAddress.getLoopbackAddress(), 5002));
     }
 
     public CompletableFuture<UDPMessage> sendPacket(InetAddress address, int port, UDPMessage msg) throws IOException {
@@ -100,12 +93,11 @@ public class TravelBrokerServer {
         socket.send(packet);
 
         // Set timeout of 10 seconds
-        future.orTimeout(5, TimeUnit.SECONDS)
-                .exceptionally(e -> {
-                    pendingRequests.remove(msg.getTransactionId());
-                    LOGGER.log(Level.WARNING, "Timeout for transaction {0}", msg.getTransactionId());
-                    return null;
-                });
+        future.orTimeout(5, TimeUnit.SECONDS).exceptionally(e -> {
+            pendingRequests.remove(msg.getTransactionId());
+            LOGGER.log(Level.WARNING, "Timeout for transaction {0}", msg.getTransactionId());
+            return null;
+        });
 
         return future;
     }
@@ -217,20 +209,24 @@ public class TravelBrokerServer {
 
             newParticipant.setBookingContext(bookingContext);
             CompletableFuture<Boolean> future = new CompletableFuture<>();
-            future.orTimeout(10, TimeUnit.SECONDS)
-                    .thenApply(e -> {
-                        LOGGER.log(Level.WARNING, "Timeout for transaction {0}", transactionId);
-                        // Since this is a timeout, we need to abort the transaction
-                        sendAbort(transactionId);
-                        return false;
-                    });
+            future.orTimeout(10, TimeUnit.SECONDS).thenApply(e -> {
+                LOGGER.log(Level.WARNING, "Timeout for transaction {0}", transactionId);
+                // Since this is a timeout, we need to abort the transaction
+                sendAbort(transactionId);
+                return false;
+            });
             newParticipant.setPrepareFuture(future);
 
             newParticipants.add(newParticipant);
         });
 
+        // Add a future to the context of the 2PC which will be completed when the 2PC is finished
+        // With this we can inform the client about the result of the 2PC
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         context.setSuccess(future);
+
+        // Add the new participants to the context and write the context to the log
+        // This is to ensure that the context is not lost in case of a crash
         context.setParticipants(newParticipants);
         logWriter.writeLog(transactionId, context);
         contexts.put(transactionId, context);
@@ -267,6 +263,8 @@ public class TravelBrokerServer {
         context.setTransactionState(TransactionState.ABORT);
 
         // Complete the future with false to let our client know that the transaction failed
+        // We can do this here because we know that the transaction failed
+        // If the decision was COMMIT, we would have to wait for the ACKs from the participants
         context.getSuccess().complete(false);
 
         // Write the log entry for the ABORT
@@ -301,8 +299,8 @@ public class TravelBrokerServer {
         // Set the transaction state to COMMIT
         context.setTransactionState(TransactionState.COMMIT);
 
-        // Complete the future with true to let our client know that the transaction succeeded
-        context.getSuccess().complete(true);
+        // In this case we can't complete the future with true because we don't know when the
+        // transaction will succeed or not. We have to wait for the ACKs from the participants
 
         // Write the log entry for the COMMIT
         logWriter.writeLog(transactionId, context);
@@ -343,11 +341,7 @@ public class TravelBrokerServer {
         CoordinatorContext context = contexts.get(message.getTransactionId());
 
         // Find the participant within the context
-        Participant participant = context.getParticipants()
-                .stream()
-                .filter(p -> p.getName().equals(message.getSender()))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("Unknown participant: " + message.getSender()));
+        Participant participant = context.getParticipants().stream().filter(p -> p.getName().equals(message.getSender())).findFirst().orElseThrow(() -> new RuntimeException("Unknown participant: " + message.getSender()));
 
         // Update the vote
         participant.setVote(result.isSuccess() ? Vote.YES : Vote.NO);
@@ -363,9 +357,6 @@ public class TravelBrokerServer {
                 // At least one participant has voted NO, so we have to abort
                 sendAbort(message.getTransactionId());
             }
-
-            // Cancel the timeout
-            participant.getPrepareFuture().cancel(false);
         }
     }
 
@@ -373,89 +364,121 @@ public class TravelBrokerServer {
         // Find the context for this transaction
         CoordinatorContext context = contexts.get(message.getTransactionId());
 
-        // Find the participant within the context
-        Participant participant = context.getParticipants()
-                .stream()
-                .filter(p -> p.getName().equals(message.getSender()))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("Unknown participant: " + message.getSender()));
+        // Parse message data to TransactionResult
+        TransactionResult result;
+        try {
+            result = mapper.readValue(message.getData(), TransactionResult.class);
+        } catch (JsonProcessingException e) {
+            LOGGER.log(Level.WARNING, "Error parsing JSON: {0}", e.getMessage());
+            throw new RuntimeException(e);
+        }
+
+        // Update the participant if commit was successful
+        if (result.isSuccess()) {
+            context.setParticipants(context.getParticipants().stream().peek(p -> {
+                if (p.getName().equals(message.getSender())) {
+                    p.setDone();
+                }
+            }).toList());
+        }
 
         // If all participants have responded, we can remove the context
+        // and complete the future with true to let our client know that the transaction succeeded
         if (context.getParticipants().stream().allMatch(Participant::isDone)) {
+            context.getSuccess().complete(true);
             contexts.remove(message.getTransactionId());
+            logWriter.deleteLog(message.getTransactionId());
         } else {
             // Otherwise we update the transaction context for the participant
-            context.setParticipants(context.getParticipants()
-                    .stream()
-                    .peek(p -> {
-                        if (p.getName().equals(message.getSender())) {
-                            p.setDone();
-                        }
-                    })
-                    .toList());
-            contexts.put(message.getTransactionId(), context);
             logWriter.writeLog(message.getTransactionId(), context);
         }
     }
 
     private void receiveAbort(UDPMessage message) {
+        // Find the context for this transaction
+        CoordinatorContext context = contexts.get(message.getTransactionId());
 
+        // Parse message data to TransactionResult
+        TransactionResult result;
+        try {
+            result = mapper.readValue(message.getData(), TransactionResult.class);
+        } catch (JsonProcessingException e) {
+            LOGGER.log(Level.WARNING, "Error parsing JSON: {0}", e.getMessage());
+            throw new RuntimeException(e);
+        }
+
+        // Update the participant if abort was successful
+        if (result.isSuccess()) {
+            context.setParticipants(context.getParticipants().stream().peek(p -> {
+                if (p.getName().equals(message.getSender())) {
+                    p.setDone();
+                }
+            }).toList());
+        }
+
+        // If all participants have responded, we can remove the context
+        if (context.getParticipants().stream().allMatch(Participant::isDone)) {
+            contexts.remove(message.getTransactionId());
+            logWriter.deleteLog(message.getTransactionId());
+        } else {
+            // Otherwise we update the transaction context for the participant
+            logWriter.writeLog(message.getTransactionId(), context);
+        }
     }
 
     private CompletableFuture<Map<String, List<Object>>> getMapCompletableFuture(List<CompletableFuture<UDPMessage>> futures, boolean isAvailability) {
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenApply(response -> {
-                    Map<String, List<Object>> result = new HashMap<>();
-                    LOGGER.log(Level.INFO, "All responses received");
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).thenApply(response -> {
+            Map<String, List<Object>> result = new HashMap<>();
+            LOGGER.log(Level.INFO, "All responses received");
 
-                    futures.forEach(msg -> {
-                        try {
-                            // Get UDPMessage from response
-                            UDPMessage message = msg.get();
-                            switch (message.getSender()) {
-                                case "HotelProvider" -> {
-                                    LOGGER.log(Level.INFO, "Parsing HotelProvider response");
+            futures.forEach(msg -> {
+                try {
+                    // Get UDPMessage from response
+                    UDPMessage message = msg.get();
+                    switch (message.getSender()) {
+                        case "HotelProvider" -> {
+                            LOGGER.log(Level.INFO, "Parsing HotelProvider response");
 
-                                    if (isAvailability) {
-                                        List<Room> rooms = mapper.readValue(message.getData(), new TypeReference<>() {
-                                        });
-                                        result.put(message.getSender(), new ArrayList<>(rooms));
-                                    } else {
-                                        List<Booking> bookings = mapper.readValue(message.getData(), new TypeReference<>() {
-                                        });
-                                        result.put(message.getSender(), new ArrayList<>(bookings));
-                                    }
-                                }
-                                case "CarProvider" -> {
-                                    LOGGER.log(Level.INFO, "Parsing CarProvider response");
-
-                                    if (isAvailability) {
-                                        List<Car> cars = mapper.readValue(message.getData(), new TypeReference<>() {
-                                        });
-                                        result.put(message.getSender(), new ArrayList<>(cars));
-                                    } else {
-                                        List<Rental> rentals = mapper.readValue(message.getData(), new TypeReference<>() {
-                                        });
-                                        result.put(message.getSender(), new ArrayList<>(rentals));
-                                    }
-                                }
-                                default -> throw new IllegalStateException("Unexpected sender: " + message.getSender());
+                            if (isAvailability) {
+                                List<Room> rooms = mapper.readValue(message.getData(), new TypeReference<>() {
+                                });
+                                result.put(message.getSender(), new ArrayList<>(rooms));
+                            } else {
+                                List<Booking> bookings = mapper.readValue(message.getData(), new TypeReference<>() {
+                                });
+                                result.put(message.getSender(), new ArrayList<>(bookings));
                             }
-                        } catch (ExecutionException e) {
-                            LOGGER.log(Level.WARNING, "Error while waiting for response", e);
-                            throw new RuntimeException(e);
-                        } catch (InterruptedException e) {
-                            LOGGER.log(Level.WARNING, "Interrupted while waiting for response", e);
-                            throw new RuntimeException(e);
-                        } catch (JsonProcessingException e) {
-                            LOGGER.log(Level.WARNING, "Error parsing JSON", e);
-                            throw new RuntimeException(e);
                         }
-                    });
+                        case "CarProvider" -> {
+                            LOGGER.log(Level.INFO, "Parsing CarProvider response");
 
-                    LOGGER.log(Level.INFO, "Returning result {0}", result);
-                    return result;
-                });
+                            if (isAvailability) {
+                                List<Car> cars = mapper.readValue(message.getData(), new TypeReference<>() {
+                                });
+                                result.put(message.getSender(), new ArrayList<>(cars));
+                            } else {
+                                List<Rental> rentals = mapper.readValue(message.getData(), new TypeReference<>() {
+                                });
+                                result.put(message.getSender(), new ArrayList<>(rentals));
+                            }
+                        }
+                        default -> throw new IllegalStateException("Unexpected sender: " + message.getSender());
+                    }
+                } catch (ExecutionException e) {
+                    LOGGER.log(Level.WARNING, "Error while waiting for response", e);
+                    throw new RuntimeException(e);
+                } catch (InterruptedException e) {
+                    LOGGER.log(Level.WARNING, "Interrupted while waiting for response", e);
+                    throw new RuntimeException(e);
+                } catch (JsonProcessingException e) {
+                    LOGGER.log(Level.WARNING, "Error parsing JSON", e);
+                    throw new RuntimeException(e);
+                }
+            });
+
+            LOGGER.log(Level.INFO, "Returning result {0}", result);
+            return result;
+        });
     }
 
 }
