@@ -107,11 +107,10 @@ public class TravelBrokerMain extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        primaryStage.setTitle("Travel Booking System");
-
         // Setup UDP server with a port that is not in use
         // from our defined ports array
         boolean serverStarted = false;
+        int usedPort = -1;
 
         while (!serverStarted) {
             for (int port : hotelProviderPorts) {
@@ -119,6 +118,7 @@ public class TravelBrokerMain extends Application {
                     server = new TravelBrokerServer(port);
                     server.startReceiving();
                     serverStarted = true;
+                    usedPort = port;
                     break;
                 } catch (SocketException e) {
                     System.out.println("Port " + port + " is already in use.");
@@ -132,6 +132,9 @@ public class TravelBrokerMain extends Application {
                 }
             }
         }
+
+
+        primaryStage.setTitle(String.format("Travel Booking System: %s", usedPort));
 
         // Setup booking scene
         setupBookingScene(primaryStage);

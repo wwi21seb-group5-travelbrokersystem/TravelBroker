@@ -123,7 +123,7 @@ public class TravelBrokerServer {
             }
         }
 
-        coordinator = new Coordinator("TravelBroker", InetAddress.getLoopbackAddress(), port);
+        coordinator = new Coordinator(String.format("TravelBroker:%s", port), InetAddress.getLoopbackAddress(), port);
         participants = List.of(new Participant("CarProvider", InetAddress.getLoopbackAddress(), 5001), new Participant("HotelProvider", InetAddress.getLoopbackAddress(), 5002));
     }
 
@@ -186,7 +186,7 @@ public class TravelBrokerServer {
                     default -> LOGGER.log(Level.WARNING, "Received unknown operation!");
                 }
             }
-        }, "TravelBrokerClient");
+        }, coordinator.getName());
 
         thread.start();
     }
