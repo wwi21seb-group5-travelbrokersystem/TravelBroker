@@ -1,6 +1,5 @@
 package org.wwi21seb.vs.group5.travelbroker;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
@@ -35,21 +34,19 @@ import java.util.UUID;
  */
 public class TravelBrokerMain extends Application {
 
+    private final String hotelProviderName = "HotelProvider";
+    private final String carProviderName = "CarProvider";
+    private int[] hotelProviderPorts = {4998, 4999, 5000};
     private TravelBrokerServer server;
     private Scene bookingScene;
     private Scene getBookingsScene;
     private Scene travelBrokerScene;
     private Scene hotelProviderScene;
     private Scene carProviderScene;
-
     private ObservableList<Car> cars = FXCollections.observableArrayList();
     private ObservableList<Room> rooms = FXCollections.observableArrayList();
     private ObservableList<Booking> bookings = FXCollections.observableArrayList();
     private ObservableList<Rental> rentals = FXCollections.observableArrayList();
-    private final ObjectMapper mapper = new ObjectMapper();
-    private final String travelBrokerName = "TravelBroker";
-    private final String hotelProviderName = "HotelProvider";
-    private final String carProviderName = "CarProvider";
 
     public static void main(String[] args) {
         launch();
@@ -112,12 +109,28 @@ public class TravelBrokerMain extends Application {
     public void start(Stage primaryStage) {
         primaryStage.setTitle("Travel Booking System");
 
-        // Setup UDP client
-        try {
-            server = new TravelBrokerServer(5000);
-            server.startReceiving();
-        } catch (SocketException e) {
-            throw new RuntimeException(e);
+        // Setup UDP server with a port that is not in use
+        // from our defined ports array
+        boolean serverStarted = false;
+
+        while (!serverStarted) {
+            for (int port : hotelProviderPorts) {
+                try {
+                    server = new TravelBrokerServer(port);
+                    server.startReceiving();
+                    serverStarted = true;
+                    break;
+                } catch (SocketException e) {
+                    System.out.println("Port " + port + " is already in use.");
+                }
+            }
+
+            // If no port is available, increase the port number
+            if (!serverStarted) {
+                for (int i = 0; i < hotelProviderPorts.length; i++) {
+                    hotelProviderPorts[i]++;
+                }
+            }
         }
 
         // Setup booking scene
@@ -352,6 +365,8 @@ public class TravelBrokerMain extends Application {
         });
 
         Button bookButton = new Button("Book");
+        bookButton.disableProperty().bind(selectedRoomLabel.textProperty().isEqualTo("None")
+                .or(selectedCarLabel.textProperty().isEqualTo("None")));
 
         searchButton.setOnMouseClicked((e -> {
             String startDate = startDatePicker.getValue().toString();

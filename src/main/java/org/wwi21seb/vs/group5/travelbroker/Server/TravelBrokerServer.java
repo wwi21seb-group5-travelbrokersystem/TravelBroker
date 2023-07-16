@@ -8,7 +8,9 @@ import org.wwi21seb.vs.group5.Model.Booking;
 import org.wwi21seb.vs.group5.Model.Car;
 import org.wwi21seb.vs.group5.Model.Rental;
 import org.wwi21seb.vs.group5.Model.Room;
-import org.wwi21seb.vs.group5.Request.*;
+import org.wwi21seb.vs.group5.Request.AvailabilityRequest;
+import org.wwi21seb.vs.group5.Request.ReservationRequest;
+import org.wwi21seb.vs.group5.Request.TransactionResult;
 import org.wwi21seb.vs.group5.TwoPhaseCommit.*;
 import org.wwi21seb.vs.group5.UDP.Operation;
 import org.wwi21seb.vs.group5.UDP.UDPMessage;
@@ -18,13 +20,13 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.*;
 
 /**
  * The TravelBrokerServer represents the server in our Travel Broker and
@@ -68,6 +70,8 @@ public class TravelBrokerServer {
         mapper = new ObjectMapper();
         pendingRequests = new ConcurrentHashMap<>();
 
+        LOGGER.log(Level.INFO, String.format("Starting TravelBrokerServer on port %s", port));
+
         // We read all existing logs and store them in our contexts HashMap.
         // This happens after a crash to recover the state of our server.
         for (CoordinatorContext context : logWriter.readAllLogs()) {
@@ -93,6 +97,7 @@ public class TravelBrokerServer {
                     if (context.getParticipants().stream().allMatch(Participant::isDone)) {
                         LOGGER.log(Level.INFO, "Transaction {0} is done", context.getTransactionId());
                         contexts.remove(context.getTransactionId());
+                        logWriter.deleteLog(context.getTransactionId());
                     } else {
                         LOGGER.log(Level.INFO, "Transaction {0} is not done yet", context.getTransactionId());
                         sendAbort(context.getTransactionId());
@@ -104,6 +109,7 @@ public class TravelBrokerServer {
                     if (context.getParticipants().stream().allMatch(Participant::isDone)) {
                         LOGGER.log(Level.INFO, "Transaction {0} is done", context.getTransactionId());
                         contexts.remove(context.getTransactionId());
+                        logWriter.deleteLog(context.getTransactionId());
                     } else {
                         LOGGER.log(Level.INFO, "Transaction {0} is not done yet", context.getTransactionId());
                         sendCommit(context.getTransactionId());
@@ -112,11 +118,12 @@ public class TravelBrokerServer {
                 default -> {
                     LOGGER.log(Level.WARNING, "Unknown transaction state {0}", context.getTransactionState());
                     contexts.remove(context.getTransactionId());
+                    logWriter.deleteLog(context.getTransactionId());
                 }
             }
         }
 
-        coordinator = new Coordinator("TravelBroker", InetAddress.getLoopbackAddress(), 5000);
+        coordinator = new Coordinator("TravelBroker", InetAddress.getLoopbackAddress(), port);
         participants = List.of(new Participant("CarProvider", InetAddress.getLoopbackAddress(), 5001), new Participant("HotelProvider", InetAddress.getLoopbackAddress(), 5002));
     }
 
@@ -221,6 +228,7 @@ public class TravelBrokerServer {
                 default -> {
                     LOGGER.log(Level.WARNING, "Unknown transaction state {0}", context.getTransactionState());
                     contexts.remove(context.getTransactionId());
+                    logWriter.deleteLog(context.getTransactionId());
                     // This is an unknown transaction state, this should not happen
                     // We handle this by sending an abort to the participant
                     // This way we prevent unwanted side effects
@@ -358,13 +366,19 @@ public class TravelBrokerServer {
         // Get the existing context for the transaction
         CoordinatorContext context = contexts.get(transactionId);
 
+        // Check if the transaction is already finished, this happens when
+        // we crash after the transaction is finished but before we can remove the context
+        // To prevent a null pointer exception, we don't call the completable future, since
+        // it does not get persisted in our log file
+        if (!context.getTransactionState().equals(TransactionState.ABORT)) {
+            // Complete the future with false to let our client know that the transaction failed
+            // We can do this here because we know that the transaction failed
+            // If the decision was ABORT, we would have to wait for the ACKs from the participants
+            context.getSuccess().complete(false);
+        }
+
         // Set the transaction state to ABORT
         context.setTransactionState(TransactionState.ABORT);
-
-        // Complete the future with false to let our client know that the transaction failed
-        // We can do this here because we know that the transaction failed
-        // If the decision was COMMIT, we would have to wait for the ACKs from the participants
-        context.getSuccess().complete(false);
 
         // Write the log entry for the ABORT
         logWriter.writeLog(transactionId, context);
@@ -383,14 +397,14 @@ public class TravelBrokerServer {
 
             // Set the commitFuture which will time out if the participant doesn't respond in time
             // We would then continue to resend our decision until we get an ACK
-            CompletableFuture<Boolean> commitFuture = new CompletableFuture<>();
+            participant.resetCommitFuture();
+            CompletableFuture<Boolean> commitFuture = participant.getCommitFuture();
             commitFuture.orTimeout(10, TimeUnit.SECONDS).exceptionally(e -> {
                 LOGGER.log(Level.WARNING, String.format("Abort timeout for %s with transaction %s", participant.getName(), transactionId));
                 // Resend the COMMIT
                 sendAbort(transactionId);
                 return null;
             });
-            participant.setCommitFuture(commitFuture);
 
             try {
                 UDPMessage message = new UDPMessage(Operation.ABORT, transactionId, "TravelBroker", null);
@@ -435,14 +449,14 @@ public class TravelBrokerServer {
 
             // Set the commitFuture which will time out if the participant doesn't respond in time
             // We would then continue to resend our decision until we get an ACK
-            CompletableFuture<Boolean> commitFuture = new CompletableFuture<>();
+            participant.resetCommitFuture();
+            CompletableFuture<Boolean> commitFuture = participant.getCommitFuture();
             commitFuture.orTimeout(10, TimeUnit.SECONDS).exceptionally(e -> {
                 LOGGER.log(Level.WARNING, String.format("Commit timeout for %s with transaction %s", participant.getName(), transactionId));
                 // Resend the COMMIT
                 sendCommit(transactionId);
                 return true;
             });
-            participant.setCommitFuture(commitFuture);
 
             try {
                 UDPMessage message = new UDPMessage(Operation.COMMIT, transactionId, "TravelBroker", null);
@@ -531,7 +545,12 @@ public class TravelBrokerServer {
         // If all participants have responded, we can remove the context
         // and complete the future with true to let our client know that the transaction succeeded
         if (context.getParticipants().stream().allMatch(Participant::isDone)) {
-            context.getSuccess().complete(true);
+            if (context.getSuccess() != null) {
+                // If the context has a future, complete it
+                // When we don't have one the coordinator crashed
+                // and we don't have a way to communicate the result to the client
+                context.getSuccess().complete(true);
+            }
             contexts.remove(message.getTransactionId());
             logWriter.deleteLog(message.getTransactionId());
         } else {
