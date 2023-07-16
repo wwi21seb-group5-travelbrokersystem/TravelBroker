@@ -114,7 +114,7 @@ public class TravelBrokerMain extends Application {
 
         // Setup UDP client
         try {
-            server = new TravelBrokerServer(5010);
+            server = new TravelBrokerServer(5000);
             server.startReceiving();
         } catch (SocketException e) {
             throw new RuntimeException(e);
